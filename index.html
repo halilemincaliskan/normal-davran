@@ -843,6 +843,7 @@ class PeerNet{
   close(){try{this.peer&&this.peer.destroy();}catch(_){}}
 }
 
+$('btn-host').disabled=$('btn-join').disabled=true;
 (async()=>{
   let room=null;
   try{if(window.claude&&window.claude.use)room=await window.claude.use('room');}catch(e){room=null;}
@@ -860,7 +861,6 @@ class PeerNet{
     note.textContent='Online oda bu görünümde açılamıyor. Tek başına deneyebilirsin.';note.className='note warn';
   }
 })();
-$('btn-host').disabled=$('btn-join').disabled=true;
 
 function myPeer(){if(!App.room)return'me';const me=App.room.peers().find(p=>p.sameTab);return me?me.peer:null;}
 function roomPeers(){return App.room?App.room.peers().filter(p=>p.presence&&p.presence.code===App.code):[];}
