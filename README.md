@@ -4,4 +4,4 @@ Trençkotun içinde dört kişi. Her oyuncu bir uzvu yönetir; kafeden kahve al�
 
 Oyna: https://halilemincaliskan.github.io/normal-davran/
 
-Online mod tarayıcıdan tarayıcıya (PeerJS) çalışır; oda kuran kişinin tarayıcısı host olur.
+Online mod herkese açık bir MQTT aracı sunucu (HiveMQ, yedek EMQX) üzerinden çalışır; oda kuran kişinin tarayıcısı host olur.

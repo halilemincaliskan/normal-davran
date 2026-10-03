@@ -183,7 +183,7 @@ button:focus-visible,input:focus-visible{outline:3px solid var(--signal);outline
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/planck@1.0.6/dist/planck.min.js"></script>
-<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
 <script>
 'use strict';
 // ---------------------------------------------------------------- constants
@@ -843,6 +843,74 @@ class PeerNet{
   close(){try{this.peer&&this.peer.destroy();}catch(_){}}
 }
 
+// Relay transport: everyone connects outward to a public MQTT broker over WSS, so home
+// routers/NATs never block it (direct WebRTC failed between friends' networks).
+// Host publishes snapshots on <code>/h, each player publishes its input on <code>/c/<id>.
+const BROKERS=['wss://broker.hivemq.com:8884/mqtt','wss://broker.emqx.io:8084/mqtt'];
+class RelayNet{
+  constructor(){this.me='p'+Math.random().toString(36).slice(2,10);this.pres={};this.remote=new Map();this.hostPres=null;this.hostSeen=0;this.c=null;}
+  connectOne(url){
+    return new Promise((res,rej)=>{
+      const c=mqtt.connect(url,{clientId:'nd_'+this.me,clean:true,connectTimeout:6000,reconnectPeriod:2000,keepalive:20});
+      const t=setTimeout(()=>{c.end(true);rej(new Error('timeout'));},7000);
+      c.once('connect',()=>{clearTimeout(t);res(c);});
+      c.on('message',(topic,buf)=>this.onMsg(topic,buf));
+    });
+  }
+  async connect(){
+    let err;
+    for(const url of BROKERS){try{this.c=await this.connectOne(url);return;}catch(e){err=e;}}
+    throw err||new Error('no broker');
+  }
+  base(){return 'normaldavran/v1/'+this.code;}
+  async host(code){
+    this.isHost=true;this.code=code;await this.connect();
+    this.c.subscribe(this.base()+'/c/+');
+  }
+  async join(code){
+    this.isHost=false;this.code=code;await this.connect();
+    this.c.subscribe(this.base()+'/h');
+    const t0=Date.now();
+    while(Date.now()-t0<6000){
+      this.presence({});
+      await new Promise(r=>setTimeout(r,300));
+      if(this.hostPres)return;
+    }
+    this.close();const e=new Error('no host');e.type='peer-unavailable';throw e;
+  }
+  onMsg(topic,buf){
+    let d;try{d=JSON.parse(buf.toString());}catch(_){return;}
+    if(!d||typeof d!=='object')return;
+    if(this.isHost){
+      const id=topic.split('/').pop();if(id===this.me)return;
+      if(d.bye)this.remote.delete(id);else this.remote.set(id,{p:d,t:Date.now()});
+    }else{this.hostPres=d;this.hostSeen=Date.now();}
+  }
+  presence(patch){
+    for(const k in patch){if(patch[k]===null)delete this.pres[k];else this.pres[k]=patch[k];}
+    if(!this.c||!this.c.connected)return Promise.resolve();
+    if(this.isHost){
+      const roster=[...this.remote.entries()].map(([id,r])=>({peer:id,n:String(r.p.n||'Oyuncu').slice(0,16),want:Array.isArray(r.p.want)?r.p.want:[]}));
+      this.c.publish(this.base()+'/h',JSON.stringify(Object.assign({},this.pres,{hid:this.me,roster})),{qos:0});
+    }else this.c.publish(this.base()+'/c/'+this.me,JSON.stringify(this.pres),{qos:0});
+    return Promise.resolve();
+  }
+  peers(){
+    const now=Date.now(),out=[{peer:this.me,sameTab:true,presence:this.pres}];
+    if(this.isHost){
+      for(const [id,r] of this.remote){if(now-r.t>5000){this.remote.delete(id);continue;}out.push({peer:id,sameTab:false,presence:r.p});}
+    }else if(this.hostPres&&now-this.hostSeen<5000){
+      const h=this.hostPres;
+      out.push({peer:String(h.hid||'host'),sameTab:false,presence:h});
+      for(const r of h.roster||[])if(r.peer!==this.me)out.push({peer:r.peer,sameTab:false,presence:{code:h.code,n:r.n,want:r.want}});
+    }
+    return out;
+  }
+  close(){
+    try{if(this.c){if(!this.isHost&&this.c.connected)this.c.publish(this.base()+'/c/'+this.me,JSON.stringify({bye:1}));this.c.end();}}catch(_){}
+  }
+}
+
 $('btn-host').disabled=$('btn-join').disabled=true;
 (async()=>{
   let room=null;
@@ -853,9 +921,9 @@ $('btn-host').disabled=$('btn-join').disabled=true;
     note.textContent='Online hazır. Oda kur ya da arkadaşının kodunu gir. (Bu sürümde sadece claude.ai\'de aynı organizasyondakiler katılabilir; dışarıdan arkadaşlar için web sürümünü kullanın.)';
     $('btn-host').disabled=$('btn-join').disabled=false;
     room.onPeers(()=>{},()=>{});
-  }else if(typeof Peer==='function'&&!window.claude){
+  }else if(typeof mqtt!=='undefined'&&mqtt.connect){
     App.transport='peer';App.roomReady=true;
-    note.textContent='Online hazır (P2P). Oda kur, kodu arkadaşlarına gönder.';
+    note.textContent='Online hazır. Oda kur, kodu arkadaşlarına gönder.';
     $('btn-host').disabled=$('btn-join').disabled=false;
   }else{
     note.textContent='Online oda bu görünümde açılamıyor. Tek başına deneyebilirsin.';note.className='note warn';
@@ -877,7 +945,7 @@ async function startHost(){
   const code=Math.random().toString(36).replace(/[^a-z0-9]/g,'').slice(0,4).padEnd(4,'x');
   if(App.transport==='peer'){
     $('btn-host').disabled=true;netNote('Oda açılıyor…');
-    const net=new PeerNet();
+    const net=new RelayNet();
     try{await net.host(code);}catch(e){net.close();$('btn-host').disabled=false;netNote('Oda açılamadı ('+(e&&e.type||'hata')+'). Tekrar dene.');return;}
     App.room=net;$('btn-host').disabled=false;
   }
@@ -893,7 +961,7 @@ async function joinRoom(){
   App.name=myName();
   if(App.transport==='peer'){
     $('btn-join').disabled=true;netNote('Odaya bağlanılıyor…');
-    const net=new PeerNet();net.pres={code,n:App.name,host:false,want:[]};
+    const net=new RelayNet();net.pres={code,n:App.name,host:false,want:[]};
     try{await net.join(code);}catch(e){net.close();$('btn-join').disabled=false;netNote(e&&e.type==='peer-unavailable'?'Bu kodla açık oda yok. Kodu kontrol et.':'Bağlanılamadı. Ağ engelliyor olabilir, tekrar dene.');return;}
     App.room=net;$('btn-join').disabled=false;
   }
